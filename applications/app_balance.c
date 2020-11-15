@@ -64,6 +64,11 @@ typedef enum {
 	ON
 } SwitchState;
 
+#ifndef FOOTSWITCH_FAULT_BUZZER_ON
+#define FOOTSWITCH_FAULT_BUZZER_ON() {}
+#define FOOTSWITCH_FAULT_BUZZER_OFF() {}
+#endif
+
 // Balance thread
 static THD_FUNCTION(balance_thread, arg);
 static THD_WORKING_AREA(balance_thread_wa, 2048); // 2kb stack for this thread
@@ -185,6 +190,7 @@ bool check_faults(bool ignoreTimers){
 	if(switch_state == OFF){
 		if(ST2MS(current_time - fault_switch_timer) > balance_conf.fault_delay_switch_full || ignoreTimers){
 			state = FAULT_SWITCH_FULL;
+			FOOTSWITCH_FAULT_BUZZER_OFF();
 			return true;
 		}
 	} else {
@@ -412,7 +418,19 @@ static THD_FUNCTION(balance_thread, arg) {
 				switch_state = OFF;
 			}
 		}
-
+		if (switch_state == OFF) {
+			if (abs_erpm > 1500) {    // If we're above 5km/h and the switch is off => ALERT the user
+				FOOTSWITCH_FAULT_BUZZER_ON();
+			}
+			else {
+				// if we drop below 5km/h stop buzzing
+				FOOTSWITCH_FAULT_BUZZER_OFF();
+			}
+		}
+		else {
+			// if the switch comes back on we stop buzzing
+			FOOTSWITCH_FAULT_BUZZER_OFF();
+		}
 
 		// Control Loop State Logic
 		switch(state){
@@ -539,6 +557,8 @@ static THD_FUNCTION(balance_thread, arg) {
 		// Delay between loops
 		chThdSleepMicroseconds((int)((1000.0 / balance_conf.hertz) * 1000.0));
 	}
+	// in case we leave this loop turn the buzzer off
+	FOOTSWITCH_FAULT_BUZZER_OFF();
 
 	// Disable output
 	brake();
