@@ -69,6 +69,13 @@ typedef enum {
 #define FOOTSWITCH_FAULT_BUZZER_OFF() {}
 #endif
 
+#ifndef LIGHT_FWD_ON
+#define LIGHT_FWD_ON() {}
+#define LIGHT_FWD_OFF() {}
+#define LIGHT_BACK_ON() {}
+#define LIGHT_BACK_OFF() {}
+#endif
+
 // Balance thread
 static THD_FUNCTION(balance_thread, arg);
 static THD_WORKING_AREA(balance_thread_wa, 2048); // 2kb stack for this thread
@@ -443,6 +450,8 @@ static THD_FUNCTION(balance_thread, arg) {
 				}
 				reset_vars();
 				state = FAULT_STARTUP; // Trigger a fault so we need to meet start conditions to start
+				LIGHT_FWD_OFF();
+				LIGHT_BACK_OFF();
 				break;
 			case (RUNNING):
 			case (RUNNING_TILTBACK_DUTY):
@@ -530,12 +539,33 @@ static THD_FUNCTION(balance_thread, arg) {
 
 				// Output to motor
 				set_current(pid_value, yaw_pid_value);
+
+				// Control the light pins
+				if (abs_erpm > balance_conf.fault_adc_half_erpm) {
+					if (erpm > 0) {
+						LIGHT_FWD_ON();
+						LIGHT_BACK_OFF();
+					}
+					else {
+						LIGHT_FWD_OFF();
+						LIGHT_BACK_ON();
+					}
+				}
+				else {
+					// when we're slow, keep both lights on to avoid flickering when not really moving 
+					LIGHT_FWD_ON();
+					LIGHT_BACK_ON();
+				}
 				break;
 			case (FAULT_ANGLE_PITCH):
 			case (FAULT_ANGLE_ROLL):
 			case (FAULT_SWITCH_HALF):
 			case (FAULT_SWITCH_FULL):
 			case (FAULT_STARTUP):
+				// TODO: Turn off the lights after a timeout (to help locating the vehicle after a crash?)
+				LIGHT_FWD_OFF();
+				LIGHT_BACK_OFF();
+
 				// Check for valid startup position and switch state
 				if(fabsf(pitch_angle) < balance_conf.startup_pitch_tolerance && fabsf(roll_angle) < balance_conf.startup_roll_tolerance && switch_state == ON){
 					reset_vars();
