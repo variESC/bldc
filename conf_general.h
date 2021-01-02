@@ -24,7 +24,7 @@
 #define FW_VERSION_MAJOR			5
 #define FW_VERSION_MINOR			02
 // Set to 0 for building a release and iterate during beta test builds
-#define FW_TEST_VERSION_NUMBER		16
+#define FW_TEST_VERSION_NUMBER		17
 
 #include "datatypes.h"
 
@@ -154,6 +154,9 @@
 //#define HW_SOURCE "hw_stormcore_100s.c"
 //#define HW_HEADER "hw_stormcore_100s.h"
 
+//#define HW_SOURCE "hw_Cheap_FOCer_2.c"
+//#define HW_HEADER "hw_Cheap_FOCer_2.h"
+
 //#define HW_SOURCE "hw_140_300.c"
 //#define HW_HEADER "hw_140_300.h"
 
@@ -162,6 +165,9 @@
 
 #define HW_SOURCE "hw_Cheap_FOCer_2_09.c"
 #define HW_HEADER "hw_Cheap_FOCer_2_09.h"
+
+//#define HW_SOURCE "hw_Little_FOCer.c"
+//#define HW_HEADER "hw_Little_FOCer.h"
 
 #endif
 
