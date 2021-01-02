@@ -459,9 +459,9 @@ make -j8 build_args='-DHAS_EXT_BUZZER -DHW_SOURCE=\"hw_Cheap_FOCer_2_10.c\" -DHW
 cd $DIR
 cp $FWPATH/build/BLDC_4_ChibiOS.bin $COPYDIR/VESC_funwheel.bin
 
-#################### CHEAP_FOCER_2 v0.9 ########################
+#################### Cheap_FOCer_2 v0.9 ########################
 
-COPYDIR=CHEAP_FOCER_2_09
+COPYDIR=Cheap_FOCer_2_09
 mkdir -p $COPYDIR
 rm -f $COPYDIR/*
 
