@@ -30,6 +30,7 @@
 #include "utils.h"
 #include "datatypes.h"
 #include "comm_can.h"
+#include "buzzer.h"
 
 
 #include <math.h>
@@ -41,8 +42,16 @@
 typedef enum {
 	STARTUP = 0,
 	RUNNING,
-	FAULT,
-	DEAD
+	RUNNING_TILTBACK_DUTY,
+	RUNNING_TILTBACK_HIGH_VOLTAGE,
+	RUNNING_TILTBACK_LOW_VOLTAGE,
+	RUNNING_TILTBACK_CONSTANT,
+	FAULT_ANGLE_PITCH,
+	FAULT_ANGLE_ROLL,
+	FAULT_SWITCH_HALF,
+	FAULT_SWITCH_FULL,
+	FAULT_DUTY,
+	FAULT_STARTUP
 } BalanceState;
 
 typedef enum {
@@ -56,85 +65,90 @@ typedef enum {
 	ON
 } SwitchState;
 
+// Allow me to go 10km/h even below low voltage
+#define TILTBACK_LOW_VOLTAGE_MIN_ERPM 3000
+// Give me another 2 Volts of margin at low speeds before doing tiltback there too
+#define TILTBACK_LOW_VOLTAGE_SLOW_MARGIN 2
+// Audible alert at 1 Volt above tiltback voltage
+#define HEADSUP_LOW_VOLTAGE_MARGIN 1
+
+#ifdef HAS_EXT_BUZZER
+static int low_voltage_headsup_done = 0;
+#endif
+
 // Balance thread
 static THD_FUNCTION(balance_thread, arg);
 static THD_WORKING_AREA(balance_thread_wa, 2048); // 2kb stack for this thread
 
-static volatile balance_config balance_conf;
-static volatile imu_config imu_conf;
 static thread_t *app_thread;
 
-// Values used in loop
-static BalanceState state;
+// Config values
+static volatile balance_config balance_conf;
+static volatile imu_config imu_conf;
+static float startup_step_size, tiltback_step_size;
+
+// Runtime values read from elsewhere
 static float pitch_angle, roll_angle;
 static float gyro[3];
 static float duty_cycle, abs_duty_cycle;
 static float erpm, abs_erpm, avg_erpm;
-static float proportional, integral, derivative;
-static float last_proportional;
-static float pid_value;
-static float yaw_proportional, yaw_integral, yaw_derivative, yaw_last_proportional, yaw_pid_value, yaw_setpoint;
-static float setpoint, setpoint_target, setpoint_target_interpolated;
-static SetpointAdjustmentType setpointAdjustmentType;
-static float startup_step_size, tiltback_step_size;
-static systime_t current_time, last_time, diff_time;
-static systime_t startup_start_time, startup_diff_time;
-static systime_t dead_start_time;
-static systime_t fault_start_time;
+static float motor_current;
+static float motor_position;
 static float adc1, adc2;
 static SwitchState switch_state;
 
-// Values read to pass in app data to GUI
-static float motor_current;
-static float motor_position;
+// Rumtime state values
+static BalanceState state;
+static float proportional, integral, derivative;
+static float last_proportional;
+static float pid_value;
+static float setpoint, setpoint_target, setpoint_target_interpolated;
+static SetpointAdjustmentType setpointAdjustmentType;
+static float yaw_proportional, yaw_integral, yaw_derivative, yaw_last_proportional, yaw_pid_value, yaw_setpoint;
+static systime_t current_time, last_time, diff_time;
+static systime_t fault_angle_pitch_timer, fault_angle_roll_timer, fault_switch_timer, fault_switch_half_timer, fault_duty_timer;
+static float d_pt1_state, d_pt1_k;
+static float max_temp_fet;
+
 
 void app_balance_configure(balance_config *conf, imu_config *conf2) {
 	balance_conf = *conf;
 	imu_conf = *conf2;
+	// Set calculated values from config
+	if(balance_conf.kd_pt1_frequency > 0){
+		float dT = 1.0 / balance_conf.hertz;
+		float RC = 1.0 / ( 2.0 * M_PI * balance_conf.kd_pt1_frequency);
+		d_pt1_k =  dT / (RC + dT);
+	}
+	startup_step_size = balance_conf.startup_speed / balance_conf.hertz;
+	tiltback_step_size = balance_conf.tiltback_speed / balance_conf.hertz;
 }
 
 void app_balance_start(void) {
-
-	// Reset all Values
+	// First start only, override state to startup
 	state = STARTUP;
-	pitch_angle = 0;
-	roll_angle = 0;
-	gyro[0] = 0;
-	gyro[1] = 0;
-	gyro[2] = 0;
-	duty_cycle = 0;
-	abs_duty_cycle = 0;
-	erpm = 0;
-	abs_erpm = 0;
-	avg_erpm = 0;
-	adc1 = 0;
-	adc2 = 0;
-	switch_state = OFF;
-	proportional = 0;
+	// Start the balance thread
+	app_thread = chThdCreateStatic(balance_thread_wa, sizeof(balance_thread_wa), NORMALPRIO, balance_thread, NULL);
+}
+
+void reset_vars(void){
+	// Clear accumulated values.
 	integral = 0;
-	derivative = 0;
 	last_proportional = 0;
-	pid_value = 0;
-	yaw_proportional = 0;
 	yaw_integral = 0;
-	yaw_derivative = 0;
 	yaw_last_proportional = 0;
-	yaw_pid_value = 0;
-	yaw_setpoint = 0;
-	setpoint = 0;
+	d_pt1_state = 0;
+	// Set values for startup
+	setpoint = pitch_angle;
+	setpoint_target_interpolated = pitch_angle;
 	setpoint_target = 0;
-	setpoint_target_interpolated = 0;
 	setpointAdjustmentType = CENTERING;
-	startup_step_size = 0;
-	tiltback_step_size = 0;
+	yaw_setpoint = 0;
+	state = RUNNING;
 	current_time = 0;
 	last_time = 0;
 	diff_time = 0;
-	startup_start_time = 0;
-	startup_diff_time = 0;
-
-	// Start the balance thread
-	app_thread = chThdCreateStatic(balance_thread_wa, sizeof(balance_thread_wa), NORMALPRIO, balance_thread, NULL);
+	max_temp_fet = mc_interface_get_configuration()->l_temp_fet_start;
 }
 
 float app_balance_get_pid_output(void) {
@@ -176,6 +190,157 @@ float get_setpoint_adjustment_step_size(void){
 			return tiltback_step_size;
 	}
 	return 0;
+}
+
+// Fault checking order does not really matter. From a UX perspective, switch should be before angle.
+bool check_faults(bool ignoreTimers){
+	// Check switch
+	// Switch fully open
+	if(switch_state == OFF){
+		// any speed:
+		if(ST2MS(current_time - fault_switch_timer) > balance_conf.fault_delay_switch_full || ignoreTimers){
+			state = FAULT_SWITCH_FULL;
+			return true;
+		}
+		// low speed (below 4 x half-fault threshold speed):
+		else if ((abs_erpm < balance_conf.fault_adc_half_erpm * 4)
+				 && (ST2MS(current_time - fault_switch_timer) > balance_conf.fault_delay_switch_half)){
+			state = FAULT_SWITCH_FULL;
+			return true;
+		}
+	} else {
+		fault_switch_timer = current_time;
+	}
+
+	// Switch partially open and stopped
+	if(switch_state == HALF && abs_erpm < balance_conf.fault_adc_half_erpm){
+		if(ST2MS(current_time - fault_switch_half_timer) > balance_conf.fault_delay_switch_half || ignoreTimers){
+			state = FAULT_SWITCH_HALF;
+			return true;
+		}
+	} else {
+		fault_switch_half_timer = current_time;
+	}
+
+	// Check pitch angle
+	if(fabsf(pitch_angle) > balance_conf.fault_pitch){
+		if(ST2MS(current_time - fault_angle_pitch_timer) > balance_conf.fault_delay_pitch || ignoreTimers){
+			state = FAULT_ANGLE_PITCH;
+			return true;
+		}
+	}else{
+		fault_angle_pitch_timer = current_time;
+	}
+
+	// Check roll angle
+	if(fabsf(roll_angle) > balance_conf.fault_roll){
+		if(ST2MS(current_time - fault_angle_roll_timer) > balance_conf.fault_delay_roll || ignoreTimers){
+			state = FAULT_ANGLE_ROLL;
+			return true;
+		}
+	}else{
+		fault_angle_roll_timer = current_time;
+	}
+
+	// Check for duty
+	if(abs_duty_cycle > balance_conf.fault_duty){
+		if(ST2MS(current_time - fault_duty_timer) > balance_conf.fault_delay_duty || ignoreTimers){
+			state = FAULT_DUTY;
+			return true;
+		}
+	} else {
+		fault_duty_timer = current_time;
+	}
+
+	return false;
+}
+
+void calculate_setpoint_target(void){
+	if(setpointAdjustmentType == CENTERING && setpoint_target_interpolated != setpoint_target){
+		// Ignore tiltback during centering sequence
+		state = RUNNING;
+	}else if(abs_duty_cycle > balance_conf.tiltback_duty){
+		if(erpm > 0){
+			setpoint_target = balance_conf.tiltback_angle;
+		} else {
+			setpoint_target = -balance_conf.tiltback_angle;
+		}
+		setpointAdjustmentType = TILTBACK;
+		state = RUNNING_TILTBACK_DUTY;
+	}else if(abs_duty_cycle > 0.05 && GET_INPUT_VOLTAGE() > balance_conf.tiltback_high_voltage){
+		if(erpm > 0){
+			setpoint_target = balance_conf.tiltback_angle;
+		} else {
+			setpoint_target = -balance_conf.tiltback_angle;
+		}
+		setpointAdjustmentType = TILTBACK;
+		state = RUNNING_TILTBACK_HIGH_VOLTAGE;
+	}else if((abs_duty_cycle > 0.05 && GET_INPUT_VOLTAGE() < balance_conf.tiltback_low_voltage) &&
+			 (abs_erpm > TILTBACK_LOW_VOLTAGE_MIN_ERPM)){
+		if(erpm > 0){
+			setpoint_target = balance_conf.tiltback_angle;
+		} else {
+			setpoint_target = -balance_conf.tiltback_angle;
+		}
+		setpointAdjustmentType = TILTBACK;
+		state = RUNNING_TILTBACK_LOW_VOLTAGE;
+	}else if((abs_duty_cycle > 0.05 && GET_INPUT_VOLTAGE() < balance_conf.tiltback_low_voltage) &&
+			 ((abs_erpm > TILTBACK_LOW_VOLTAGE_MIN_ERPM) ||
+			  (GET_INPUT_VOLTAGE() < (balance_conf.tiltback_low_voltage - TILTBACK_LOW_VOLTAGE_SLOW_MARGIN)))){
+		// tiltback only if we're going fast, or if the voltage is REALLY low
+		// e.g. if threshold is at 40V, we allow voltage down to 38V if going slow
+		if(erpm > 0){
+			setpoint_target = balance_conf.tiltback_angle;
+		} else {
+			setpoint_target = -balance_conf.tiltback_angle;
+		}
+		setpointAdjustmentType = TILTBACK;
+		state = RUNNING_TILTBACK_LOW_VOLTAGE;
+	}else{
+		// Normal running
+		if(balance_conf.tiltback_constant != 0 && abs_erpm > balance_conf.tiltback_constant_erpm){
+			// Nose angle adjustment
+			if(erpm > 0){
+				setpoint_target = balance_conf.tiltback_constant;
+			} else {
+				setpoint_target = -balance_conf.tiltback_constant;
+			}
+			setpointAdjustmentType = TILTBACK;
+			state = RUNNING_TILTBACK_CONSTANT;
+		}else{
+			setpointAdjustmentType = TILTBACK;
+			setpoint_target = 0;
+			state = RUNNING;
+		}
+#ifdef HAS_EXT_BUZZER
+		if (low_voltage_headsup_done == 0) {
+			if(GET_INPUT_VOLTAGE() < balance_conf.tiltback_low_voltage + HEADSUP_LOW_VOLTAGE_MARGIN) {
+				low_voltage_headsup_done = 1;
+				beep_alert(4, 0);
+			}
+		}
+#endif
+
+#ifdef HAS_EXT_BUZZER
+		if (mc_interface_temp_fet_filtered() > max_temp_fet) {
+			// issue two long beeps if we entered max temp territory for our FETs
+			beep_alert(2, 1);
+		}
+#endif
+	}
+}
+
+void calculate_setpoint_interpolated(void){
+	if(setpoint_target_interpolated != setpoint_target){
+		// If we are less than one step size away, go all the way
+		if(fabsf(setpoint_target - setpoint_target_interpolated) < get_setpoint_adjustment_step_size()){
+			setpoint_target_interpolated = setpoint_target;
+		}else if (setpoint_target - setpoint_target_interpolated > 0){
+			setpoint_target_interpolated += get_setpoint_adjustment_step_size();
+		}else{
+			setpoint_target_interpolated -= get_setpoint_adjustment_step_size();
+		}
+	}
 }
 
 float apply_deadzone(float error){
@@ -237,12 +402,6 @@ static THD_FUNCTION(balance_thread, arg) {
 	(void)arg;
 	chRegSetThreadName("APP_BALANCE");
 
-	// Do one off config
-	startup_step_size = balance_conf.startup_speed / balance_conf.hertz;
-	tiltback_step_size = balance_conf.tiltback_speed / balance_conf.hertz;
-
-	state = STARTUP;
-
 	while (!chThdShouldTerminateX()) {
 		// Update times
 		current_time = chVTGetSystemTimeX();
@@ -282,32 +441,59 @@ static THD_FUNCTION(balance_thread, arg) {
 #endif
 
 		// Calculate switch state from ADC values
-		if(balance_conf.adc1 == 0 && balance_conf.adc2 == 0){ // No Switch
+		if(balance_conf.fault_adc1 == 0 && balance_conf.fault_adc2 == 0){ // No Switch
 			switch_state = ON;
-		}else if(balance_conf.adc2 == 0){ // Single switch on ADC1
-			if(adc1 > balance_conf.adc1){
+		}else if(balance_conf.fault_adc2 == 0){ // Single switch on ADC1
+			if(adc1 > balance_conf.fault_adc1){
 				switch_state = ON;
 			} else {
 				switch_state = OFF;
 			}
-		}else if(balance_conf.adc1 == 0){ // Single switch on ADC2
-			if(adc2 > balance_conf.adc2){
+		}else if(balance_conf.fault_adc1 == 0){ // Single switch on ADC2
+			if(adc2 > balance_conf.fault_adc2){
 				switch_state = ON;
 			} else {
 				switch_state = OFF;
 			}
 		}else{ // Double switch
-			if(adc1 > balance_conf.adc1 && adc2 > balance_conf.adc2){
+			if(adc1 > balance_conf.fault_adc1 && adc2 > balance_conf.fault_adc2){
 				switch_state = ON;
-			}else if(adc1 > balance_conf.adc1 || adc2 > balance_conf.adc2){
+			}else if(adc1 > balance_conf.fault_adc1 || adc2 > balance_conf.fault_adc2){
 				switch_state = HALF;
 			}else{
 				switch_state = OFF;
 			}
 		}
 
+		/*
+		 * Use external buzzer to notify rider of foot switch faults.
+		 */
+#ifdef HAS_EXT_BUZZER
+		if (switch_state == OFF) {
+			if ((abs_erpm > balance_conf.fault_adc_half_erpm)
+				&& (state >= RUNNING)
+				&& (state <= RUNNING_TILTBACK_CONSTANT))
+			{
+				// If we're at riding speed and the switch is off => ALERT the user
+				// set force=true since this could indicate an imminent shutdown/nosedive
+				beep_on(true);
+			}
+			else {
+#ifdef HAS_EXT_BUZZER
+				// if we drop below riding speed stop buzzing
+				beep_off(false);
+#endif
+			}
+		}
+		else {
+#ifdef HAS_EXT_BUZZER
+			// if the switch comes back on we stop buzzing
+			beep_off(false);
+#endif
+		}
+#endif
 
-		// State based logic
+		// Control Loop State Logic
 		switch(state){
 			case (STARTUP):
 				while(!imu_startup_done()){
@@ -316,70 +502,28 @@ static THD_FUNCTION(balance_thread, arg) {
 					// Wait
 					chThdSleepMilliseconds(50);
 				}
-				state = FAULT;
-				startup_start_time = 0;
-				startup_diff_time = 0;
+				reset_vars();
+				state = FAULT_STARTUP; // Trigger a fault so we need to meet start conditions to start
+				// Keep lights off while in startup state
+				LIGHT_FWD_OFF();
+				LIGHT_BACK_OFF();
 				break;
 			case (RUNNING):
-				// Check for overspeed
-				if(abs_duty_cycle > balance_conf.overspeed_duty){
-					if(ST2MS(current_time - dead_start_time) > balance_conf.overspeed_delay){
-						state = DEAD;
-					}
-				} else {
-					dead_start_time = current_time;
+			case (RUNNING_TILTBACK_DUTY):
+			case (RUNNING_TILTBACK_HIGH_VOLTAGE):
+			case (RUNNING_TILTBACK_LOW_VOLTAGE):
+			case (RUNNING_TILTBACK_CONSTANT):
+
+				// Check for faults
+				if(check_faults(false)){
+					break;
 				}
 
-				// Check for fault
-				if(
-					fabsf(pitch_angle) > balance_conf.pitch_fault || // Balnce axis tip over
-					fabsf(roll_angle) > balance_conf.roll_fault || // Cross axis tip over
-					switch_state == OFF || // Switch fully open
-					(switch_state == HALF && abs_erpm < balance_conf.adc_half_fault_erpm) // Switch partially open and stopped
-						){
-					if(ST2MS(current_time - fault_start_time) > balance_conf.fault_delay){
-						state = FAULT;
-					}
-				} else {
-					fault_start_time = current_time;
-				}
+				// Calculate setpoint and interpolation
+				calculate_setpoint_target();
+				calculate_setpoint_interpolated();
 
-				// Over speed tilt back safety
-				if(setpointAdjustmentType == CENTERING && setpoint_target_interpolated != setpoint_target){
-					// Ignore tiltback during centering sequence
-				}else if(abs_duty_cycle > balance_conf.tiltback_duty ||
-						(abs_duty_cycle > 0.05 && GET_INPUT_VOLTAGE() > balance_conf.tiltback_high_voltage) ||
-						(abs_duty_cycle > 0.05 && GET_INPUT_VOLTAGE() < balance_conf.tiltback_low_voltage)){
-					if(duty_cycle > 0){
-						setpoint_target = balance_conf.tiltback_angle;
-					} else {
-						setpoint_target = -balance_conf.tiltback_angle;
-					}
-					setpointAdjustmentType = TILTBACK;
-				}else if(abs_duty_cycle > 0.03){
-					// Nose angle adjustment
-					if(duty_cycle > 0){
-						setpoint_target = balance_conf.tiltback_constant;
-					} else {
-						setpoint_target = -balance_conf.tiltback_constant;
-					}
-					setpointAdjustmentType = TILTBACK;
-				}else{
-					setpointAdjustmentType = TILTBACK;
-					setpoint_target = 0;
-				}
-
-				// Adjust setpoint
-				if(setpoint_target_interpolated != setpoint_target){
-					// If we are less than one step size away, go all the way
-					if(fabsf(setpoint_target - setpoint_target_interpolated) < get_setpoint_adjustment_step_size()){
-						setpoint_target_interpolated = setpoint_target;
-					}else if (setpoint_target - setpoint_target_interpolated > 0){
-						setpoint_target_interpolated += get_setpoint_adjustment_step_size();
-					}else{
-						setpoint_target_interpolated -= get_setpoint_adjustment_step_size();
-					}
-				}
+				update_beep_alert();
 
 				// Apply setpoint filtering
 				if(setpointAdjustmentType == CENTERING){
@@ -388,10 +532,14 @@ static THD_FUNCTION(balance_thread, arg) {
 				}else{
 					setpoint = (setpoint * (1-balance_conf.setpoint_pitch_filter)) + (pitch_angle * balance_conf.setpoint_pitch_filter);
 					setpoint = (setpoint * (1-balance_conf.setpoint_target_filter)) + (setpoint_target_interpolated * balance_conf.setpoint_target_filter);
-					if(setpoint > balance_conf.setpoint_clamp){
-						setpoint = balance_conf.setpoint_clamp;
-					}else if (setpoint < -balance_conf.setpoint_clamp){
-						setpoint = -balance_conf.setpoint_clamp;
+				}
+
+				// Clamp setpoint
+				if(setpointAdjustmentType != CENTERING){
+					if(setpoint - setpoint_target_interpolated > balance_conf.setpoint_filter_clamp){
+						setpoint = setpoint_target_interpolated + balance_conf.setpoint_filter_clamp;
+					}else if (setpoint - setpoint_target_interpolated < -balance_conf.setpoint_filter_clamp){
+						setpoint = setpoint_target_interpolated - balance_conf.setpoint_filter_clamp;
 					}
 				}
 
@@ -403,6 +551,12 @@ static THD_FUNCTION(balance_thread, arg) {
 				integral = integral + proportional;
 				derivative = proportional - last_proportional;
 
+				// Apply D term only filter
+				if(balance_conf.kd_pt1_frequency > 0){
+					d_pt1_state = d_pt1_state + d_pt1_k * (derivative - d_pt1_state);
+					derivative = d_pt1_state;
+				}
+
 				pid_value = (balance_conf.kp * proportional) + (balance_conf.ki * integral) + (balance_conf.kd * derivative);
 
 				last_proportional = proportional;
@@ -413,6 +567,7 @@ static THD_FUNCTION(balance_thread, arg) {
 				}else if(pid_value < 0){
 					pid_value -= balance_conf.current_boost;
 				}
+
 
 				if(balance_conf.multi_esc){
 					// Calculate setpoint
@@ -441,27 +596,46 @@ static THD_FUNCTION(balance_thread, arg) {
 
 				// Output to motor
 				set_current(pid_value, yaw_pid_value);
+
+				/*
+				 * Control the light pins
+				 * If lights aren't supported by the hardware, the code below is optimized out by compiler
+				 */
+				if (abs_erpm > balance_conf.fault_adc_half_erpm) {
+					// we're at riding speed => turn on the forward facing lights
+					if (erpm > 0) {
+						LIGHT_FWD_ON();
+						LIGHT_BACK_OFF();
+					}
+					else {
+						LIGHT_FWD_OFF();
+						LIGHT_BACK_ON();
+					}
+				}
+				else {
+					// when we're slow, keep both lights on to avoid flickering when not really moving
+					LIGHT_FWD_ON();
+					LIGHT_BACK_ON();
+				}
 				break;
-			case (FAULT):
+			case (FAULT_ANGLE_PITCH):
+			case (FAULT_ANGLE_ROLL):
+			case (FAULT_SWITCH_HALF):
+			case (FAULT_SWITCH_FULL):
+			case (FAULT_STARTUP):
 				// Check for valid startup position and switch state
 				if(fabsf(pitch_angle) < balance_conf.startup_pitch_tolerance && fabsf(roll_angle) < balance_conf.startup_roll_tolerance && switch_state == ON){
-					// Clear accumulated values.
-					integral = 0;
-					last_proportional = 0;
-					yaw_integral = 0;
-					yaw_last_proportional = 0;
-					// Set values for startup
-					setpoint = pitch_angle;
-					setpoint_target = 0;
-					setpoint_target_interpolated = pitch_angle;
-					setpointAdjustmentType = CENTERING;
-					state = RUNNING;
+					reset_vars();
 					break;
 				}
 				// Disable output
 				brake();
 				break;
-			case (DEAD):
+			case (FAULT_DUTY):
+				// We need another fault to clear duty fault.
+				// Otherwise duty fault will clear itself as soon as motor pauses, then motor will spool up again.
+				// Rendering this fault useless.
+				check_faults(true);
 				// Disable output
 				brake();
 				break;
@@ -470,6 +644,15 @@ static THD_FUNCTION(balance_thread, arg) {
 		// Delay between loops
 		chThdSleepMicroseconds((int)((1000.0 / balance_conf.hertz) * 1000.0));
 	}
+#ifdef HAS_EXT_BUZZER
+	// in case we leave this force the buzzer off (force=regardless of ongoing multi beeps)
+	beep_off(true);
+#endif
+
+	// we've stopped riding => turn the lights off
+	// TODO: Add delay (to help spot the vehicle after a crash?)
+	LIGHT_FWD_OFF();
+	LIGHT_BACK_OFF();
 
 	// Disable output
 	brake();
