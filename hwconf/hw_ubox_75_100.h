@@ -20,13 +20,7 @@
 #ifndef HW_75_300_H_
 #define HW_75_300_H_
 
-#ifdef HW75_300_REV_3
-#define HW_NAME					"75_300_R3"
-#elif defined(HW75_300_REV_2)
-#define HW_NAME					"75_300_R2"
-#else
-#define HW_NAME					"75_300"
-#endif
+#define HW_NAME					"UBOX_75_100"
 
 // HW properties
 #define HW_HAS_3_SHUNTS
