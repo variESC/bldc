@@ -4,6 +4,8 @@ set -e
 FWPATH="../"
 DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
+
+
 ################## HW 46 & 47 #######################
 
 COPYDIR=46_o_47
@@ -72,6 +74,7 @@ touch conf_general.h
 make -j8 build_args='-DCURRENT_SHUNT_RES=0.0005 -DHW_SOURCE=\"hw_410.c\" -DHW_HEADER=\"hw_410.h\"' USE_VERBOSE_COMPILE=no
 cd $DIR
 cp $FWPATH/build/BLDC_4_ChibiOS.bin $COPYDIR/VESC_0005ohm.bin
+
 
 #################### HW 60 ########################
 
@@ -531,6 +534,7 @@ touch conf_general.h
 make -j8 build_args='-DDISABLE_HW_LIMITS -DHW_SOURCE=\"hw_Little_FOCer.c\" -DHW_HEADER=\"hw_Little_FOCer.h\"' USE_VERBOSE_COMPILE=no
 cd $DIR
 cp $FWPATH/build/BLDC_4_ChibiOS.bin $COPYDIR/VESC_default_no_hw_limits.bin
+
 
 # Clean
 cd $FWPATH
