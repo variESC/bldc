@@ -142,7 +142,7 @@ static THD_FUNCTION(ppm_thread, arg) {
 		case PPM_CTRL_TYPE_CURRENT_NOREV:
 		case PPM_CTRL_TYPE_DUTY_NOREV:
 		case PPM_CTRL_TYPE_PID_NOREV:
-		case PPM_CTRL_TYPE_DUTY_MIN_NOREV:
+		case PPM_CTRL_TYPE_DUTY_COAST_NOREV:
 			input_val = servo_val;
 			servo_val += 1.0;
 			servo_val /= 2.0;
@@ -334,8 +334,8 @@ static THD_FUNCTION(ppm_thread, arg) {
 			}
 			break;
 
-		case PPM_CTRL_TYPE_DUTY_MIN:
-		case PPM_CTRL_TYPE_DUTY_MIN_NOREV:
+		case PPM_CTRL_TYPE_DUTY_COAST:
+		case PPM_CTRL_TYPE_DUTY_COAST_NOREV:
 			if (fabsf(servo_val) < 0.001) {
 				pulses_without_power++;
 			}

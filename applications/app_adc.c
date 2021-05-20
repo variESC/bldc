@@ -150,6 +150,7 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_DUTY_REV_CENTER:
+		case ADC_CTRL_TYPE_DUTY_COAST_REV_CENTER:
 		case ADC_CTRL_TYPE_PID_REV_CENTER:
 			// Mapping with respect to center voltage
 			if (pwr < config.voltage_center) {
@@ -258,7 +259,7 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_DUTY_REV_CENTER:
-		case ADC_CTRL_TYPE_DUTY_MIN_REV_CENTER:
+		case ADC_CTRL_TYPE_DUTY_COAST_REV_CENTER:
 		case ADC_CTRL_TYPE_PID_REV_CENTER:
 			// Scale the voltage and set 0 at the center
 			pwr *= 2.0;
@@ -273,7 +274,7 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON:
 		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_BUTTON:
 		case ADC_CTRL_TYPE_DUTY_REV_BUTTON:
-		case ADC_CTRL_TYPE_DUTY_MIN_REV_BUTTON:
+		case ADC_CTRL_TYPE_DUTY_COAST_REV_BUTTON:
 		case ADC_CTRL_TYPE_PID_REV_BUTTON:
 			// Invert the voltage if the button is pressed
 			if (rev_button) {
@@ -374,33 +375,18 @@ static THD_FUNCTION(adc_thread, arg) {
 			}
 			break;
 
-		case ADC_CTRL_TYPE_DUTY_MIN:
-		case ADC_CTRL_TYPE_DUTY_MIN_REV_CENTER:
-		case ADC_CTRL_TYPE_DUTY_MIN_REV_BUTTON:
+		case ADC_CTRL_TYPE_DUTY_COAST:
+		case ADC_CTRL_TYPE_DUTY_COAST_REV_CENTER:
+		case ADC_CTRL_TYPE_DUTY_COAST_REV_BUTTON:
 			if (fabsf(pwr) < 0.001) {
 				ms_without_power += (1000.0 * (float)sleep_time) / (float)CH_CFG_ST_FREQUENCY;
 			}
-			float requested_duty = utils_map(pwr, -1.0, 1.0, -mcconf->l_max_duty, mcconf->l_max_duty);
-			float duty_cycle_now = mc_interface_get_duty_cycle_now();
 			if (!(ms_without_power < MIN_MS_WITHOUT_POWER && config.safe_start)) {
 				if (fabsf(pwr) < 0.001) {                         // zero duty requested
 					mc_interface_release_motor();
 				} else {
-					current_mode = true;
-					//send_current = true;                              // not implemented
-					if (requested_duty < 0) {                   // negative duty requested
-						if (duty_cycle_now < requested_duty) {         // motor overspinning
-							current = -1.0 * mcconf->cc_min_current;
-						} else {                                      // motor underspinning
-							current = -1.0 * mcconf->l_current_max * mcconf->l_current_max_scale;
-						}
-					} else {                                    // positive duty requested
-						if (duty_cycle_now > requested_duty) {         // motor overspinning
-							current = mcconf->cc_min_current;
-						} else {                                      // motor underspinning
-							current = mcconf->l_current_max * mcconf->l_current_max_scale;
-						}
-					}
+					mc_interface_set_duty(utils_map(pwr, -1.0, 1.0, -mcconf->l_max_duty, mcconf->l_max_duty));
+					send_duty = true;
 				}
 			}
 			break;
