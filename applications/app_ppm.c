@@ -339,27 +339,15 @@ static THD_FUNCTION(ppm_thread, arg) {
 			if (fabsf(servo_val) < 0.001) {
 				pulses_without_power++;
 			}
-			float requested_duty = utils_map(servo_val, -1.0, 1.0, -mcconf->l_max_duty, mcconf->l_max_duty);
-			float duty_cycle_now = mc_interface_get_duty_cycle_now();
 			if (!(pulses_without_power < MIN_PULSES_WITHOUT_POWER && config.safe_start)) {
-				if (fabsf(servo_val) < 0.001) {                   // zero duty requested
+				if (fabsf(servo_val) < 0.001) {                         // zero duty requested
 					mc_interface_release_motor();
-				} else {
-					current_mode = true;
 					send_current = true;
-					if (requested_duty < 0.0F) {                   // negative duty requested
-						if (duty_cycle_now < requested_duty) {         // motor overspinning
-							current = -1.0 * mcconf->cc_min_current;
-						} else {                                      // motor underspinning
-							current = -1.0 * mcconf->l_current_max * mcconf->l_current_max_scale;
-						}
-					} else {                                    // positive duty requested
-						if (duty_cycle_now > requested_duty) {         // motor overspinning
-							current = mcconf->cc_min_current;
-						} else {                                      // motor underspinning
-							current = mcconf->l_current_max * mcconf->l_current_max_scale;
-						}
-					}
+					current_mode = true;
+					current = 0.0;
+				} else {
+					mc_interface_set_duty(utils_map(servo_val, -1.0, 1.0, -mcconf->l_max_duty, mcconf->l_max_duty));
+					send_duty = true;
 				}
 			}
 			break;
